@@ -7,17 +7,25 @@
 # TODO - figure out drive quotas
 # TODO - batch mode?
 
-import pickle, re, collections, time, webbrowser
+import collections
 import json
 import os.path
+import pickle
+import re
+import time
+import webbrowser
+import http.client
+from urllib.parse import urlparse
+
+from apiclient.http import MediaFileUpload, MediaIoBaseDownload
+from google.auth.transport.requests import Request
+from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
-from apiclient.http import MediaIoBaseDownload, MediaFileUpload
 
+from ezsheets.colorvalues import COLORS
 
-__version__ = "2021.08.05"
+__version__ = "2024.8.9"
 
 # SCOPES_SHEETS = ['https://www.googleapis.com/auth/spreadsheets.readonly']
 SCOPES_SHEETS = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -37,8 +45,6 @@ DEFAULT_FROZEN_COLUMN_COUNT = 0
 DEFAULT_HIDE_GRID_LINES = False
 DEFAULT_ROW_GROUP_CONTROL_AFTER = False
 DEFAULT_COLUMN_GROUP_CONTROL_AFTER = False
-
-from ezsheets.colorvalues import COLORS
 
 # Quota throttling:
 _READ_REQUESTS = collections.deque()
@@ -173,7 +179,7 @@ class Spreadsheet:
     contain one or more sheets, also called worksheets.
     """
 
-    def __init__(self, spreadsheetId):
+    def __init__(self, spreadsheetId=None):
         """
         Initializer for Spreadsheet objects.
 
@@ -182,7 +188,36 @@ class Spreadsheet:
         if not IS_INITIALIZED:
             init()  # Initialize this module if not done so already.
 
+        if spreadsheetId is None:
+            # Create a new spreadsheet.
+            ss = createSpreadsheet()
+            self._spreadsheetId = ss.id
+            self.sheets = ()
+            self.refresh()            
+            return
+
         try:
+            # Figure out if this URL redirects to the Google Sheets URL.
+            # NOTE: Restricted spreadsheets will redirect a docs.google.com url to their https://accounts.google.com/v3/signin/... URL, which
+            # we don't want, so if it begins with docs.google.com just use it and don't check for redirects. (This doesn't apply to shared spreadsheets.)
+            while spreadsheetId.lower().startswith('http') and not spreadsheetId.lower().startswith('https://docs.google.com'):
+
+                redirects = [spreadsheetId]
+                while True:
+                    parsed_url = urlparse(spreadsheetId)
+                    http_conn = http.client.HTTPConnection(parsed_url.netloc)
+                    http_conn.request("GET", parsed_url.path)
+                    response = http_conn.getresponse()
+                    redirects.append(spreadsheetId)
+
+                    spreadsheetId = response.getheader('Location')
+                    if spreadsheetId == redirects[-1] or response.status not in (301, 302):
+                        """There's some weird behavior where the google doc url keeps redirecting to itself forever,
+                        hence why I added the spreadsheetId == redirects[-1] check. I'm not sure what causes this.
+                        Requests doesn't have this problem, nor does `wget https://bit.ly/3D34nDh 2>&1 | grep Location:`
+                        so I can't quite fix it. But this works well enough for now."""
+                        break
+
             try:
                 spreadsheetId = getIdFromUrl(spreadsheetId)
             except ValueError:
@@ -328,9 +363,18 @@ class Spreadsheet:
     @property
     def spreadsheetId(self):
         """
-        The unique id for this Spreadsheet on Google Sheets.
+        The unique, read-only id for this Spreadsheet on Google Sheets. (This is the old, deprecated name. Use id instead.)
         """
         return self._spreadsheetId
+
+
+    @property
+    def id(self):
+        """
+        The unique, read-only id for this Spreadsheet on Google Sheets.
+        """
+        return self._spreadsheetId
+
 
     @property
     def url(self):
@@ -357,6 +401,7 @@ class Spreadsheet:
         A string representation of code that can recreate this Spreadsheet object.
         """
         return "%s(spreadsheetId=%r)" % (type(self).__name__, self.spreadsheetId)
+        # NOTE that the __str__ function will still use "spreadsheetId" instead of "id" to maintain backwards compatibility.
 
     @property
     def title(self):
@@ -461,6 +506,24 @@ class Spreadsheet:
 
     def open(self):
         webbrowser.open(self.url)
+
+
+    def __eq__(self, other):
+        """
+        A Spreadsheet object is only considered equal to Spreadsheet objects with the same ID.
+        """
+        if not isinstance(other, Spreadsheet):
+            return False
+        return self.spreadsheetId == other.spreadsheetId
+
+    def Sheet(self, title="", index=None, columnCount=DEFAULT_NEW_COLUMN_COUNT, rowCount=DEFAULT_NEW_ROW_COUNT):
+        # Wrapper for createSheet(). Now that we can create Spreadsheet
+        # objects with by calling the Spreadsheet() class's init, we
+        # should have similar code for create sheets.
+        # The createSpreadsheet() and createSheet() functions remain,
+        # but they were always awkward from an API design point of view.
+        self.createSheet(title, index, columnCount, rowCount)
+
 
 
 def _makeFilenameSafe(filename):
@@ -593,9 +656,9 @@ class Sheet:
 
         # Update the index:
         if value > self._index:
-            value += (
-                1
-            )  # Google Sheets uses "before the move" indexes, which is confusing and I don't want to do it here.
+            # Google Sheets uses "before the move" indexes, which is confusing and I don't want to do it here.
+            value += 1
+
 
         # request = SHEETS_SERVICE.spreadsheets().batchUpdate(spreadsheetId=self._spreadsheet._spreadsheetId,
         # body={
@@ -634,9 +697,18 @@ class Sheet:
     @property
     def sheetId(self):
         """
-        The unique ID string of this Sheet object in its Spreadsheet.
+        The unique, read-only ID string of this Sheet object in its Spreadsheet. (This is the old, deprecated name. Use id instead.)
         """
         return self._sheetId
+
+    @property
+    def id(self):
+        """
+        The unique, read-only ID string of this Sheet object in its Spreadsheet. (This is the old, deprecated name. Use id instead.)
+        """
+        # NOTE that the __str__ function will still use "sheetId" instead of "id" to maintain backwards compatibility.
+        return self._sheetId
+
 
     @property
     def rowCount(self):
@@ -792,6 +864,7 @@ class Sheet:
             self._rowCount,
             self._columnCount,
         )
+        # NOTE that the __str__ function will still use "sheetId" instead of "id" to maintain backwards compatibility.
 
     def __repr__(self):
         """
@@ -804,6 +877,7 @@ class Sheet:
             self._rowCount,
             self._columnCount,
         )
+        # NOTE that the __str__ function will still use "sheetId" instead of "id" to maintain backwards compatibility.
 
     def get(self, *args):
         """
@@ -1079,6 +1153,15 @@ class Sheet:
         if value == "":
             del self._cells[(column, row)]
         else:
+            # Google Sheets seem to only store strings (TODO: verify this), but we can't
+            # do a simple str() call here because True and False are stored as 'TRUE' and 'FALSE'
+            # I don't want to have to do a refresh on each setting, so for the _cells cache
+            # I'll just hard code some known rules and we can hunt down the edge cases later.
+            if isinstance(value, bool):
+                value = str(value).upper()
+            else:
+                value = str(value)
+
             self._cells[(column, row)] = value
 
     def updateRow(self, row, values):
@@ -1366,7 +1449,6 @@ class Sheet:
         self._cells = {}
 
     def copyTo(self, destinationSpreadsheet):
-
         # NOTE: Don't update this method to allow ID or URL strings to be
         # passed, because we'll always need to call refresh() on the
         # spreadsheet object itself.
@@ -1565,7 +1647,7 @@ def convertToColumnRowInts(arg):
     assert False  # pragma: no cover We know this will always return before this point because arg[-1].isdecimal().
 
 
-def createSpreadsheet(title=""):
+def createSpreadsheet(title="Untitled spreadsheet"):
     if not IS_INITIALIZED:
         init()  # Initialize this module if not done so already.
     # request = SHEETS_SERVICE.spreadsheets().create(body={
@@ -1625,7 +1707,7 @@ def getColumnNumberOf(columnLetter):
     number = 0
     place = 0
     for digit in reversed(digits):
-        number += digit * (26 ** place)
+        number += digit * (26**place)
         place += 1
 
     return number
@@ -1653,16 +1735,37 @@ def convertAddress(*address):
 
 
 def init(
-    credentialsFile="credentials-sheets.json",
+    credentialsFile='.',
     sheetsTokenFile="token-sheets.pickle",
     driveTokenFile="token-drive.pickle",
     _raiseException=True,
 ):
     global SHEETS_SERVICE, DRIVE_SERVICE, IS_INITIALIZED
 
-    IS_INITIALIZED = (
-        False
-    )  # Set this to False, in case module was initialized before but this current initialization fails.
+    # Set this to False, in case module was initialized before but this current initialization fails.
+    IS_INITIALIZED = False
+
+    # If the credentialsFile parameter is None, assume the credentials json file in the cwd.
+    # In version 2023.3.14 and before (and in Automate the Boring Stuff
+    # 2nd Edition), the credentials file had to be credentials-sheets.json.
+    # But this isn't the name it has when you download it from Google
+    # Cloud Console, so we'll just use the client_secret_*.json filename
+    # format it already has, and fall back on credentials-sheets.json.
+    # If credentialsFile is a folder name, use that folder to search for the credentials file.
+
+    # credentialsFile is a bit misleading of a name because it can be a file or a folder (that contains the credentials file)
+    if os.path.isdir(os.path.abspath(credentialsFile)):
+        # If credentialsFile is a folder, search that folder for credentials-sheets.json or client_secret_*.json files:
+        possibleCredentialsFiles = []
+        for filename in os.listdir(os.path.abspath(credentialsFile)):
+            if (filename.startswith('client_secret_') and filename.endswith('.json')) or filename == 'credentials-sheets.json':
+                possibleCredentialsFiles.append(filename)
+        if len(possibleCredentialsFiles) == 0:
+            credentialsFile = 'credentials-sheets.json'  # Setting it to this nonexistant file will trigger the later EZSheetsException.
+        elif len(possibleCredentialsFiles) > 1:
+            raise EZSheetsException('You must specify a credentialsFile argument to init() because multiple possible credential files exist in ' + str(os.getcwd()) + ': ' + ', '.join(possibleCredentialsFiles))
+        elif len(possibleCredentialsFiles) == 1:
+            credentialsFile = os.path.join(os.path.abspath(credentialsFile), possibleCredentialsFiles[0])
 
     try:
         if not os.path.exists(credentialsFile):
@@ -1670,6 +1773,12 @@ def init(
                 'Can\'t find credentials file at %s. You can download this file from https://developers.google.com/sheets/api/quickstart/python  and clicking "Enable the Google Sheets API". Rename the downloaded file to credentials-sheets.json.'
                 % (os.path.abspath(credentialsFile))
             )
+
+        # Find the token files, assume they are in the same folder as the credentials file:
+        if not os.path.isabs(sheetsTokenFile):
+            sheetsTokenFile = os.path.join(os.path.dirname(os.path.abspath(credentialsFile)), sheetsTokenFile)
+        if not os.path.isabs(driveTokenFile):
+            driveTokenFile = os.path.join(os.path.dirname(os.path.abspath(credentialsFile)), driveTokenFile)
 
         # Log in to Google Sheets API to generate token-sheets.pickle.
         creds = None
@@ -1778,7 +1887,7 @@ def upload(filename):
     file = _makeRequest(
         "drive.create",
         **{
-            "body": {"name": filename, "mimeType": "application/vnd.google-apps.spreadsheet"},
+            "body": {"name": os.path.basename(filename), "mimeType": "application/vnd.google-apps.spreadsheet"},
             "media_body": media,
             "fields": "id",
         }
